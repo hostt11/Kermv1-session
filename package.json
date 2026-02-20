@@ -16,7 +16,7 @@
   "author": "GlobalTechInfo",
   "license": "ISC",
   "dependencies": {
-    "@whiskeysockets/baileys": "github:WhiskeySockets/Baileys",
+    "@whiskeysockets/baileys": "6.7.21",
     "qrcode": "^1.5.4",
     "awesome-phonenumber": "^2.70.0",
     "pino": "^9.5.0",
