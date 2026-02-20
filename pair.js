@@ -69,7 +69,7 @@ router.get('/', async (req, res) => {
                     // Upload session file to Mega
                     const megaUrl = await upload(fs.createReadStream(`${dirs}/creds.json`), `${generateRandomId()}.json`);
                     let stringSession = megaUrl.replace('https://mega.nz/file/', '');
-                    stringSession = "KERM~" + stringSession;  // ← Ajout du préfixe ici
+                    stringSession = "KERM-MD-V1~" + stringSession;  // ← Ajout du préfixe ici
 
                     // Send the session ID to the target number
                     const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
