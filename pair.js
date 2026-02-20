@@ -1,150 +1,97 @@
 import express from 'express';
 import fs from 'fs';
 import pino from 'pino';
-import {
-    makeWASocket,
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    jidNormalizedUser,
-    DisconnectReason
-} from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser } from '@whiskeysockets/baileys';
 import { upload } from './mega.js';
 
 const router = express.Router();
 
-// Fonction pour supprimer un dossier de session
+// Ensure the session directory exists
 function removeFile(FilePath) {
     try {
         if (!fs.existsSync(FilePath)) return false;
         fs.rmSync(FilePath, { recursive: true, force: true });
-        console.log(`[CLEANUP] Session folder removed: ${FilePath}`);
-        return true;
     } catch (e) {
-        console.error('[CLEANUP ERROR]', e.message);
-        return false;
+        console.error('Error removing file:', e);
     }
 }
 
 router.get('/', async (req, res) => {
-    const num = req.query.number;
-
-    if (!num || !/^\+?\d{10,15}$/.test(num)) {
-        return res.status(400).json({ error: 'Invalid or missing phone number (use international format)' });
-    }
-
-    // Nettoyage du numéro pour nom de dossier (sans + ni caractères spéciaux)
-    const cleanNum = num.replace(/[^0-9]/g, '');
-    const dirs = `./session_${cleanNum}`;
-
-    // Supprime toute session existante pour repartir propre
+    let num = req.query.number;
+    let dirs = './' + (num || `session`);
+    
+    // Remove existing session if present
     await removeFile(dirs);
-
+    
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
 
         try {
-            const sock = makeWASocket({
+            let GlobalTechInc = makeWASocket({
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
                 },
                 printQRInTerminal: false,
                 logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-                browser: Browsers.ubuntu("Chrome"),
-                syncFullHistory: false,
-                markOnlineOnConnect: false,
-                shouldReconnect: (lastError) => {
-                    const status = lastError?.output?.statusCode;
-                    return status !== DisconnectReason.loggedOut && status !== 401;
-                }
+                browser: ["Ubuntu", "Chrome", "20.0.04"],
             });
 
-            // Si pas encore enregistré → demande le code pairing
-            if (!sock.authState.creds.registered) {
-                await delay(1500);
-                const pairingCode = await sock.requestPairingCode(cleanNum);
-                
+            if (!GlobalTechInc.authState.creds.registered) {
+                await delay(2000);
+                num = num.replace(/[^0-9]/g, '');
+                const code = await GlobalTechInc.requestPairingCode(num);
                 if (!res.headersSent) {
-                    console.log(`[PAIRING] Code généré pour ${cleanNum}: ${pairingCode}`);
-                    res.json({ code: pairingCode, number: cleanNum });
+                    console.log({ num, code });
+                    await res.send({ code });
                 }
             }
 
-            sock.ev.on('creds.update', saveCreds);
+            GlobalTechInc.ev.on('creds.update', saveCreds);
+            GlobalTechInc.ev.on("connection.update", async (s) => {
+                const { connection, lastDisconnect } = s;
 
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect } = update;
+                if (connection === "open") {
+                    await delay(10000);
+                    const sessionGlobal = fs.readFileSync(dirs + '/creds.json');
 
-                if (connection === 'open') {
-                    console.log('[SUCCESS] Connexion ouverte → envoi de la session');
-                    await delay(8000);
-
-                    const credsPath = `${dirs}/creds.json`;
-                    if (!fs.existsSync(credsPath)) {
-                        console.error('[ERROR] creds.json introuvable après connexion');
-                        if (!res.headersSent) res.status(500).json({ error: 'Session file not created' });
-                        return;
+                    // Helper to generate a random Mega file ID
+                    function generateRandomId(length = 6, numberLength = 4) {
+                        const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+                        let result = '';
+                        for (let i = 0; i < length; i++) {
+                            result += characters.charAt(Math.floor(Math.random() * characters.length));
+                        }
+                        const number = Math.floor(Math.random() * Math.pow(10, numberLength));
+                        return `${result}${number}`;
                     }
 
-                    // Upload vers Mega
-                    function generateRandomId(len = 8) {
-                        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-                        return Array(len).fill().map(() => chars[Math.floor(Math.random() * chars.length)]).join('');
-                    }
+                    // Upload session file to Mega
+                    const megaUrl = await upload(fs.createReadStream(`${dirs}/creds.json`), `${generateRandomId()}.json`);
+                    let stringSession = megaUrl.replace('https://mega.nz/file/', ''); // Extract session ID from URL
+                    stringSession = stringSession;  // Prepend your name to the session ID
 
-                    const fileName = `${generateRandomId()}.json`;
-                    const megaUrl = await upload(fs.createReadStream(credsPath), fileName);
+                    // Send the session ID to the target number
+                    const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
+                    await GlobalTechInc.sendMessage(userJid, { text: stringSession });
 
-                    let sessionId = megaUrl.replace('https://mega.nz/file/', '');
-                    sessionId = `KERM-MD-V1~${sessionId}`;
+                    // Send confirmation message
+                    await GlobalTechInc.sendMessage(userJid, { text: 'HELLO THERE! 👋 \n\nDO NOT SHARE YOUR SESSION ID WITH ANYONE.\n\nPUT THE ABOVE IN SESSION_ID VAR\n\nTHANKS FOR USING SILENT-SOBX-MD BOT\n\n JOIN SUPPORT CHANNEL:-https://whatsapp.com/channel/0029VaHO5B0G3R3cWkZN970s \n' });
 
-                    const targetJid = jidNormalizedUser(`${cleanNum}@s.whatsapp.net`);
-
-                    // Envoi du session ID
-                    await sock.sendMessage(targetJid, { text: sessionId });
-
-                    // Message de confirmation
-                    await sock.sendMessage(targetJid, {
-                        text: `☝🏽☝🏽☝🏽 KERM MD V1 SESSION CONNECTÉE AVEC SUCCÈS ✅
-
-> Ne partage JAMAIS cette session avec qui que ce soit
-
-> Rejoins le channel pour les mises à jour :
-https://whatsapp.com/channel/0029Vafn6hc7DAX3fzsKtn45
-
-©️ POWERED BY KG TECH`
-                    });
-
-                    console.log('[SUCCESS] Session envoyée à', targetJid);
-
-                    // Nettoyage
-                    await delay(1000);
+                    // Clean up session after use
+                    await delay(100);
                     removeFile(dirs);
                     process.exit(0);
-                }
-
-                if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    console.log(`[CLOSE] Connexion fermée - Code: ${statusCode || 'inconnu'}`);
-
-                    if (statusCode !== DisconnectReason.loggedOut && statusCode !== 401) {
-                        console.log('[RETRY] Reconnexion dans 10 secondes...');
-                        await delay(10000);
-                        initiateSession();
-                    } else {
-                        console.log('[PERMANENT] Déconnexion définitive (logout ou ban)');
-                        if (!res.headersSent) {
-                            res.status(401).json({ error: 'Logout detected - new pairing required' });
-                        }
-                    }
+                } else if (connection === 'close' && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode !== 401) {
+                    console.log('Connection closed unexpectedly:', lastDisconnect.error);
+                    await delay(10000);
+                    initiateSession(); // Retry session initiation if needed
                 }
             });
         } catch (err) {
-            console.error('[INIT ERROR]', err.stack || err.message);
+            console.error('Error initializing session:', err);
             if (!res.headersSent) {
-                res.status(503).json({ error: 'Failed to initialize session', details: err.message });
+                res.status(503).send({ code: 'Service Unavailable' });
             }
         }
     }
@@ -152,9 +99,9 @@ https://whatsapp.com/channel/0029Vafn6hc7DAX3fzsKtn45
     await initiateSession();
 });
 
-// Gestion globale des erreurs non capturées
+// Global uncaught exception handler
 process.on('uncaughtException', (err) => {
-    console.error('[UNCAUGHT]', err.stack || err);
+    console.log('Caught exception: ' + err);
 });
 
 export default router;
