@@ -14,26 +14,31 @@ import { upload } from './mega.js';
 
 const router = express.Router();
 
-// Ensure the session directory exists
+// Fonction pour supprimer un dossier de session
 function removeFile(FilePath) {
     try {
         if (!fs.existsSync(FilePath)) return false;
         fs.rmSync(FilePath, { recursive: true, force: true });
-        console.log(`Session folder removed: ${FilePath}`);
+        console.log(`[CLEANUP] Session folder removed: ${FilePath}`);
+        return true;
     } catch (e) {
-        console.error('Error removing session folder:', e);
+        console.error('[CLEANUP ERROR]', e.message);
+        return false;
     }
 }
 
 router.get('/', async (req, res) => {
-    let num = req.query.number;
-    if (!num) {
-        return res.status(400).json({ error: 'Missing number parameter' });
+    const num = req.query.number;
+
+    if (!num || !/^\+?\d{10,15}$/.test(num)) {
+        return res.status(400).json({ error: 'Invalid or missing phone number (use international format)' });
     }
 
-    let dirs = './' + num.replace(/[^0-9]/g, ''); // sanitize number
+    // Nettoyage du numéro pour nom de dossier (sans + ni caractères spéciaux)
+    const cleanNum = num.replace(/[^0-9]/g, '');
+    const dirs = `./session_${cleanNum}`;
 
-    // Remove any existing session to start fresh
+    // Supprime toute session existante pour repartir propre
     await removeFile(dirs);
 
     async function initiateSession() {
@@ -47,97 +52,99 @@ router.get('/', async (req, res) => {
                 },
                 printQRInTerminal: false,
                 logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-                browser: Browsers.ubuntu("Chrome", "20.0.04"),
+                browser: Browsers.ubuntu("Chrome"),
                 syncFullHistory: false,
+                markOnlineOnConnect: false,
                 shouldReconnect: (lastError) => {
-                    const statusCode = lastError?.output?.statusCode;
-                    return statusCode !== DisconnectReason.loggedOut && statusCode !== 401;
+                    const status = lastError?.output?.statusCode;
+                    return status !== DisconnectReason.loggedOut && status !== 401;
                 }
             });
 
+            // Si pas encore enregistré → demande le code pairing
             if (!sock.authState.creds.registered) {
-                await delay(2000);
-                const cleanNum = num.replace(/[^0-9]/g, '');
-                const code = await sock.requestPairingCode(cleanNum);
+                await delay(1500);
+                const pairingCode = await sock.requestPairingCode(cleanNum);
                 
                 if (!res.headersSent) {
-                    console.log(`Pairing code generated for ${cleanNum}: ${code}`);
-                    res.json({ code });
+                    console.log(`[PAIRING] Code généré pour ${cleanNum}: ${pairingCode}`);
+                    res.json({ code: pairingCode, number: cleanNum });
                 }
             }
 
             sock.ev.on('creds.update', saveCreds);
 
-            sock.ev.on("connection.update", async (update) => {
+            sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect } = update;
 
-                if (connection === "open") {
-                    console.log('Connection opened successfully');
-                    await delay(10000);
+                if (connection === 'open') {
+                    console.log('[SUCCESS] Connexion ouverte → envoi de la session');
+                    await delay(8000);
 
                     const credsPath = `${dirs}/creds.json`;
                     if (!fs.existsSync(credsPath)) {
-                        console.error('creds.json not found after connection open');
+                        console.error('[ERROR] creds.json introuvable après connexion');
+                        if (!res.headersSent) res.status(500).json({ error: 'Session file not created' });
                         return;
                     }
 
-                    const sessionData = fs.readFileSync(credsPath);
-
-                    // Generate random Mega file ID
-                    function generateRandomId(length = 6, numberLength = 4) {
+                    // Upload vers Mega
+                    function generateRandomId(len = 8) {
                         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-                        let result = '';
-                        for (let i = 0; i < length; i++) {
-                            result += chars.charAt(Math.floor(Math.random() * chars.length));
-                        }
-                        const number = Math.floor(Math.random() * Math.pow(10, numberLength));
-                        return `${result}${number}`;
+                        return Array(len).fill().map(() => chars[Math.floor(Math.random() * chars.length)]).join('');
                     }
 
                     const fileName = `${generateRandomId()}.json`;
                     const megaUrl = await upload(fs.createReadStream(credsPath), fileName);
-                    
-                    let stringSession = megaUrl.replace('https://mega.nz/file/', '');
-                    stringSession = "KERM-MD-V1~" + stringSession;
 
-                    const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
+                    let sessionId = megaUrl.replace('https://mega.nz/file/', '');
+                    sessionId = `KERM-MD-V1~${sessionId}`;
 
-                    // Send session string
-                    await sock.sendMessage(userJid, { text: stringSession });
+                    const targetJid = jidNormalizedUser(`${cleanNum}@s.whatsapp.net`);
 
-                    // Send confirmation message
-                    await sock.sendMessage(userJid, {
-                        text: '☝🏽☝🏽☝🏽𝖪𝖤𝖱𝖬 𝖬𝖣 𝖵𝟦 𝖲𝖤𝖲𝖲𝖨𝖮𝖭 𝖨𝖲 𝖲𝖴𝖢𝖢𝖤𝖲𝖲𝖥𝖴𝖫𝖫𝖸 𝖢𝖮𝖭𝖭𝖤𝖢𝖳𝖤𝖣✅\n\n' +
-                              '> 𝖣𝗈𝗇’𝗍 𝖲𝗁𝖺𝗋𝖾 𝖳𝗁𝗂𝗌 𝖲𝖾𝗌𝗌𝗂𝗈𝗇 𝖶𝗂𝗍𝗁 𝖲𝗈𝗆𝖾𝗈𝗇𝖾\n\n' +
-                              '> 𝖩𝗈𝗂𝗇 𝖢𝗁𝖺𝗇𝗇𝖾𝗅 𝖭𝗈𝗐: https://whatsapp.com/channel/0029Vafn6hc7DAX3fzsKtn45\n\n\n' +
-                              '> ©️𝖯𝖮𝖶𝖤𝖱𝖤𝖣 𝖡𝖸 𝖪𝖦𝖳𝖤𝖢𝖧'
+                    // Envoi du session ID
+                    await sock.sendMessage(targetJid, { text: sessionId });
+
+                    // Message de confirmation
+                    await sock.sendMessage(targetJid, {
+                        text: `☝🏽☝🏽☝🏽 KERM MD V1 SESSION CONNECTÉE AVEC SUCCÈS ✅
+
+> Ne partage JAMAIS cette session avec qui que ce soit
+
+> Rejoins le channel pour les mises à jour :
+https://whatsapp.com/channel/0029Vafn6hc7DAX3fzsKtn45
+
+©️ POWERED BY KG TECH`
                     });
 
-                    console.log('Session sent successfully to', userJid);
+                    console.log('[SUCCESS] Session envoyée à', targetJid);
 
-                    // Cleanup
-                    await delay(500);
+                    // Nettoyage
+                    await delay(1000);
                     removeFile(dirs);
                     process.exit(0);
                 }
 
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    console.log(`Connection closed - Status: ${statusCode || 'unknown'}`);
+                    console.log(`[CLOSE] Connexion fermée - Code: ${statusCode || 'inconnu'}`);
 
                     if (statusCode !== DisconnectReason.loggedOut && statusCode !== 401) {
-                        console.log('Reconnecting in 10 seconds...');
+                        console.log('[RETRY] Reconnexion dans 10 secondes...');
                         await delay(10000);
-                        initiateSession(); // retry
+                        initiateSession();
                     } else {
-                        console.log('Permanent disconnect (logout or ban)');
+                        console.log('[PERMANENT] Déconnexion définitive (logout ou ban)');
+                        if (!res.headersSent) {
+                            res.status(401).json({ error: 'Logout detected - new pairing required' });
+                        }
                     }
                 }
             });
         } catch (err) {
-            console.error('Error during session initiation:', err.stack || err);
+            console.error('[INIT ERROR]', err.stack || err.message);
             if (!res.headersSent) {
-                res.status(503).json({ error: 'Service temporarily unavailable', details: err.message });
+                res.status(503).json({ error: 'Failed to initialize session', details: err.message });
             }
         }
     }
@@ -145,9 +152,9 @@ router.get('/', async (req, res) => {
     await initiateSession();
 });
 
-// Global uncaught exception handler
+// Gestion globale des erreurs non capturées
 process.on('uncaughtException', (err) => {
-    console.error('Uncaught exception:', err.stack || err);
+    console.error('[UNCAUGHT]', err.stack || err);
 });
 
 export default router;
