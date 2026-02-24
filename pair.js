@@ -1,107 +1,137 @@
 import express from 'express';
 import fs from 'fs';
 import pino from 'pino';
-import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser } from '@whiskeysockets/baileys';
+import {
+    makeWASocket,
+    useMultiFileAuthState,
+    delay,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    jidNormalizedUser,
+    DisconnectReason
+} from '@whiskeysockets/baileys';
 import { upload } from './mega.js';
 
 const router = express.Router();
 
-// Ensure the session directory exists
+// Suppression propre du dossier session
 function removeFile(FilePath) {
     try {
-        if (!fs.existsSync(FilePath)) return false;
+        if (!fs.existsSync(FilePath)) return;
         fs.rmSync(FilePath, { recursive: true, force: true });
+        console.log(`[CLEANUP] Session supprimée → ${FilePath}`);
     } catch (e) {
-        console.error('Error removing file:', e);
+        console.error('[CLEANUP ERROR]', e.message);
     }
 }
 
 router.get('/', async (req, res) => {
     let num = req.query.number;
-    let dirs = './' + (num || `session`);
-    
-    // Remove existing session if present
+    if (!num) return res.status(400).json({ error: 'Numéro manquant ?number=2376...' });
+
+    // Nettoyage du numéro
+    const cleanNum = num.replace(/[^0-9]/g, '');
+    const dirs = `./session_${cleanNum}`;
+
     await removeFile(dirs);
-    
+
     async function initiateSession() {
         const { state, saveCreds } = await useMultiFileAuthState(dirs);
 
         try {
-            let GlobalTechInc = makeWASocket({
+            const sock = makeWASocket({
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
                 },
                 printQRInTerminal: false,
                 logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-                browser: ["Ubuntu", "Chrome", "20.0.04"],
+                browser: Browsers.ubuntu("Chrome"),
+                syncFullHistory: false,
+                markOnlineOnConnect: false
             });
 
-            if (!GlobalTechInc.authState.creds.registered) {
-                await delay(2000);
-                num = num.replace(/[^0-9]/g, '');
-                const code = await GlobalTechInc.requestPairingCode(num);
+            if (!sock.authState.creds.registered) {
+                await delay(1500);
+                const code = await sock.requestPairingCode(cleanNum);
+
+                console.log(`[PAIRING CODE] ${cleanNum} → ${code}`);
                 if (!res.headersSent) {
-                    console.log({ num, code });
-                    await res.send({ code });
+                    res.json({ code, number: cleanNum });
                 }
             }
 
-            GlobalTechInc.ev.on('creds.update', saveCreds);
-            GlobalTechInc.ev.on("connection.update", async (s) => {
-                const { connection, lastDisconnect } = s;
+            sock.ev.on('creds.update', saveCreds);
 
-                if (connection === "open") {
-                    await delay(10000);
-                    const sessionGlobal = fs.readFileSync(dirs + '/creds.json');
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect } = update;
 
-                    // Helper to generate a random Mega file ID
-                    function generateRandomId(length = 6, numberLength = 4) {
-                        const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-                        let result = '';
-                        for (let i = 0; i < length; i++) {
-                            result += characters.charAt(Math.floor(Math.random() * characters.length));
-                        }
-                        const number = Math.floor(Math.random() * Math.pow(10, numberLength));
-                        return `${result}${number}`;
+                if (connection === 'open') {
+                    console.log('✅ Connexion réussie → envoi de la session');
+
+                    await delay(8000);
+
+                    const credsPath = `${dirs}/creds.json`;
+                    const sessionData = fs.readFileSync(credsPath);
+
+                    // Upload Mega
+                    function generateRandomId() {
+                        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+                        return Array(8).fill().map(() => chars[Math.floor(Math.random() * chars.length)]).join('');
                     }
 
-                    // Upload session file to Mega
-                    const megaUrl = await upload(fs.createReadStream(`${dirs}/creds.json`), `${generateRandomId()}.json`);
-                    let stringSession = megaUrl.replace('https://mega.nz/file/', ''); // Extract session ID from URL
-                    stringSession = stringSession;  // Prepend your name to the session ID
+                    const megaUrl = await upload(fs.createReadStream(credsPath), `${generateRandomId()}.json`);
+                    let stringSession = megaUrl.replace('https://mega.nz/file/', '');
+                    stringSession = `KERM-MD-V1~${stringSession}`;   // ← IMPORTANT
 
-                    // Send the session ID to the target number
-                    const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                    await GlobalTechInc.sendMessage(userJid, { text: stringSession });
+                    const userJid = jidNormalizedUser(`${cleanNum}@s.whatsapp.net`);
 
-                    // Send confirmation message
-                    await GlobalTechInc.sendMessage(userJid, { text: 'HELLO THERE! 👋 \n\nDO NOT SHARE YOUR SESSION ID WITH ANYONE.\n\nPUT THE ABOVE IN SESSION_ID VAR\n\nTHANKS FOR USING SILENT-SOBX-MD BOT\n\n JOIN SUPPORT CHANNEL:-https://whatsapp.com/channel/0029VaHO5B0G3R3cWkZN970s \n' });
+                    // Envoi du session ID
+                    await sock.sendMessage(userJid, { text: stringSession });
 
-                    // Clean up session after use
-                    await delay(100);
+                    // Message de succès clair
+                    await sock.sendMessage(userJid, {
+                        text: `✅ *KERM-MD-V1 CONNECTÉ AVEC SUCCÈS !*
+
+🔑 *Session ID :*
+\`\`\`${stringSession}\`\`\`
+
+⚠️ *Ne partage jamais ce code avec personne !*
+
+📌 Colle-le dans ta variable `SESSION_ID` de ton bot.
+
+🔗 Channel updates : https://whatsapp.com/channel/0029Vafn6hc7DAX3fzsKtn45
+
+© KG TECH`
+                    });
+
+                    await delay(1500);
                     removeFile(dirs);
                     process.exit(0);
-                } else if (connection === 'close' && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode !== 401) {
-                    console.log('Connection closed unexpectedly:', lastDisconnect.error);
-                    await delay(10000);
-                    initiateSession(); // Retry session initiation if needed
+                }
+
+                if (connection === 'close') {
+                    const status = lastDisconnect?.error?.output?.statusCode;
+                    console.log(`[CLOSE] Code : ${status}`);
+
+                    if (status !== DisconnectReason.loggedOut && status !== 401) {
+                        console.log('🔄 Reconnexion dans 10s...');
+                        await delay(10000);
+                        initiateSession();
+                    }
                 }
             });
         } catch (err) {
-            console.error('Error initializing session:', err);
-            if (!res.headersSent) {
-                res.status(503).send({ code: 'Service Unavailable' });
-            }
+            console.error('[ERROR]', err.stack || err);
+            if (!res.headersSent) res.status(500).json({ error: err.message });
         }
     }
 
     await initiateSession();
 });
 
-// Global uncaught exception handler
 process.on('uncaughtException', (err) => {
-    console.log('Caught exception: ' + err);
+    console.error('[CRASH]', err.stack || err);
 });
 
 export default router;
