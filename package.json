@@ -1,11 +1,11 @@
 {
   "name": "webpair",
   "version": "0.0.1",
-  "description": "A multi-functional WhatsApp bot Web paircode.",
+  "description": "A multi-functional WhatsApp bot Web paircode, Node 24 compatible.",
   "main": "index.js",
   "type": "module",
   "engines": {
-    "node": ">=20.15.0",
+    "node": ">=24.0.0",
     "npm": ">=10.0.0"
   },
   "scripts": {
@@ -16,7 +16,7 @@
   "author": "GlobalTechInfo",
   "license": "ISC",
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.21",
+    "@whiskeysockets/baileys": "7.0.0-rc.9",
     "qrcode": "^1.5.4",
     "awesome-phonenumber": "^7.5.0",
     "pino": "^10.3.0",
